@@ -118,13 +118,13 @@ async function processUnseenMessage(
         mailbox: message.mailbox,
         uid: message.uid,
         emailId,
-        recipient: dependencies.config.forwardToAddress,
+        recipient: dependencies.config.forwardToAddresses,
         runId
       },
       "Forwarding original message"
     );
     await dependencies.smtp.forwardOriginalMail({
-      forwardToAddress: dependencies.config.forwardToAddress,
+      forwardToAddresses: dependencies.config.forwardToAddresses,
       original: parsed,
       rawSource: message.source,
       uid: message.uid,
@@ -136,7 +136,7 @@ async function processUnseenMessage(
     dependencies.db.recordOutboundAction({
       emailId,
       actionType: "forward_original",
-      recipient: dependencies.config.forwardToAddress,
+      recipient: formatRecipients(dependencies.config.forwardToAddresses),
       subject: buildForwardSubject(parsed.subject),
       status: "sent",
       runId
@@ -219,6 +219,10 @@ function normalizeDate(value: Date | string | undefined): Date | undefined {
   }
 
   return value instanceof Date ? value : new Date(value);
+}
+
+function formatRecipients(recipients: string[]): string {
+  return recipients.join(", ");
 }
 
 function delay(ms: number, signal?: AbortSignal): Promise<void> {

@@ -11,7 +11,7 @@ pnpm install
 cp .env.example .env
 ```
 
-Fill in `YAHOO_EMAIL`, `YAHOO_APP_PASSWORD`, and `FORWARD_TO_ADDRESS`. Use a Yahoo app password, not the account password. `FORWARD_TO_ADDRESS` must be different from `YAHOO_EMAIL`.
+Fill in `YAHOO_EMAIL`, `YAHOO_APP_PASSWORD`, and `FORWARD_TO_ADDRESS`. Use a Yahoo app password, not the account password. `FORWARD_TO_ADDRESS` accepts one address or a comma-separated list, and every destination must be different from `YAHOO_EMAIL`.
 
 ## Commands
 

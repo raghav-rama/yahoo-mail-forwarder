@@ -30,7 +30,7 @@ describe("Yahoo SMTP client", () => {
     });
 
     await smtp.forwardOriginalMail({
-      forwardToAddress: "archive@example.com",
+      forwardToAddresses: ["archive@example.com", "backup@example.com"],
       original: {
         messageId: "<worker-1@example.com>",
         fromAddress: "alice@example.com",
@@ -46,7 +46,7 @@ describe("Yahoo SMTP client", () => {
 
     expect(nodemailerMock.sendMail).toHaveBeenCalledWith({
       from: "me@yahoo.com",
-      to: "archive@example.com",
+      to: ["archive@example.com", "backup@example.com"],
       subject: "Fwd: Hello",
       text: expect.stringContaining("Original from: alice@example.com"),
       headers: {

@@ -4,7 +4,7 @@ import { runPollOnce } from "../src/worker.js";
 
 const workerConfig = {
   yahooEmail: "me@yahoo.com",
-  forwardToAddress: "archive@example.com",
+  forwardToAddresses: ["archive@example.com", "backup@example.com"],
   maxEmailChars: 12_000
 };
 
@@ -42,7 +42,7 @@ Can you keep this for me?`);
 
     expect(forwardOriginalMail).toHaveBeenCalledOnce();
     expect(forwardOriginalMail).toHaveBeenCalledWith({
-      forwardToAddress: "archive@example.com",
+      forwardToAddresses: ["archive@example.com", "backup@example.com"],
       original: expect.objectContaining({
         messageId: "<worker-1@example.com>",
         fromAddress: "alice@example.com",
@@ -67,7 +67,7 @@ Can you keep this for me?`);
       .get(email?.id) as { actionType: string; recipient: string; subject: string; status: string } | undefined;
     expect(action).toEqual({
       actionType: "forward_original",
-      recipient: "archive@example.com",
+      recipient: "archive@example.com, backup@example.com",
       subject: "Fwd: Please forward",
       status: "sent"
     });

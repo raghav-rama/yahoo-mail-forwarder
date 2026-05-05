@@ -13,7 +13,16 @@ describe("configuration", () => {
       FORWARD_TO_ADDRESS: "archive@example.com"
     });
 
-    expect(config.forwardToAddress).toBe("archive@example.com");
+    expect(config.forwardToAddresses).toEqual(["archive@example.com"]);
+  });
+
+  it("accepts comma-separated forwarding destinations", () => {
+    const config = loadConfig({
+      ...requiredEnv,
+      FORWARD_TO_ADDRESS: "archive@example.com, backup@example.com ,ops@example.com"
+    });
+
+    expect(config.forwardToAddresses).toEqual(["archive@example.com", "backup@example.com", "ops@example.com"]);
   });
 
   it("rejects missing forwarding destinations", () => {
@@ -24,7 +33,16 @@ describe("configuration", () => {
     expect(() =>
       loadConfig({
         ...requiredEnv,
-        FORWARD_TO_ADDRESS: "ME@yahoo.com"
+        FORWARD_TO_ADDRESS: "archive@example.com, ME@yahoo.com"
+      })
+    ).toThrow();
+  });
+
+  it("rejects invalid comma-separated forwarding destinations", () => {
+    expect(() =>
+      loadConfig({
+        ...requiredEnv,
+        FORWARD_TO_ADDRESS: "archive@example.com, not-an-email"
       })
     ).toThrow();
   });

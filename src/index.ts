@@ -41,7 +41,7 @@ async function main() {
     {
       config: {
         yahooEmail: config.yahooEmail,
-        forwardToAddress: config.forwardToAddress,
+        forwardToAddresses: config.forwardToAddresses,
         mailPollIntervalMs: config.mailPollIntervalMs,
         maxEmailChars: config.maxEmailChars,
         databasePath: config.databasePath,

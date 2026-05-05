@@ -4,7 +4,7 @@ import type { AppConfig } from "../config.js";
 import type { ParsedEmail } from "./parser.js";
 
 export type OriginalMailForwardInput = {
-  forwardToAddress: string;
+  forwardToAddresses: string[];
   original: Pick<
     ParsedEmail,
     "messageId" | "fromAddress" | "subject" | "date" | "replyToAddresses" | "bodyText"
@@ -36,7 +36,7 @@ export function createYahooSmtpClient(config: Pick<AppConfig, "yahooEmail" | "ya
 
       return transporter.sendMail({
         from: config.yahooEmail,
-        to: input.forwardToAddress,
+        to: input.forwardToAddresses,
         subject,
         text: buildForwardBody(input.original),
         headers: {

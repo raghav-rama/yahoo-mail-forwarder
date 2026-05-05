@@ -1,0 +1,15 @@
+.env
+.env.*
+.envrc
+.direnv
+.git
+.gitignore
+.pnpm-store
+Dockerfile
+README.md
+AGENTS.md
+data
+dist
+node_modules
+npm-debug.log*
+pnpm-debug.log*

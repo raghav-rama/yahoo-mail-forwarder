@@ -2,131 +2,131 @@ import { describe, expect, it, vi } from "vitest";
 import { createMailAgentDb } from "../src/db/client.js";
 import { runPollOnce } from "../src/worker.js";
 
+const workerConfig = {
+  yahooEmail: "me@yahoo.com",
+  forwardToAddress: "archive@example.com",
+  maxEmailChars: 12_000
+};
+
 describe("worker orchestration", () => {
-  it("persists, drafts for review, and marks seen only after successful processing", async () => {
+  it("forwards unseen mail, records the action, marks seen after forwarding, and skips duplicates", async () => {
     const db = createMailAgentDb(":memory:");
     const markSeen = vi.fn();
+    const forwardOriginalMail = vi.fn().mockResolvedValue({ messageId: "smtp-1" });
+    const rawSource = Buffer.from(`From: Alice <alice@example.com>
+Reply-To: Alice Replies <reply@example.com>
+To: Me <me@yahoo.com>
+Subject: Please forward
+Message-ID: <worker-1@example.com>
+Date: Mon, 1 Jan 2024 12:00:00 +0000
+
+Can you keep this for me?`);
     const imap = {
       fetchUnseen: vi.fn().mockResolvedValue([
         {
           mailbox: "INBOX",
           uidValidity: "999",
           uid: 77,
-          source: Buffer.from(`From: Alice <alice@example.com>
-To: Me <me@yahoo.com>
-Subject: Please reply
-Message-ID: <worker-1@example.com>
-Date: Mon, 1 Jan 2024 12:00:00 +0000
-
-Can you confirm receipt?`)
+          source: rawSource
         }
       ]),
       markSeen
     };
-    const router = vi.fn().mockResolvedValue({
-      category: "needs_action",
-      confidence: 0.95,
-      recommended_action: "draft_reply",
-      risk_flags: [],
-      reason: "sender asks for confirmation"
-    });
-    const responder = vi.fn().mockResolvedValue({
-      reply_subject: "Re: Please reply",
-      reply_body_text: "Confirmed, thank you.",
-      tone: "concise",
-      missing_context: [],
-      confidence: 0.96,
-      requires_human_review: false
-    });
 
     await runPollOnce({
       db,
-      config: {
-        yahooEmail: "me@yahoo.com",
-        maxEmailChars: 12000,
-        minAutoConfidence: 0.92,
-        autoSend: false,
-        draftReviewAddress: undefined
-      },
+      config: workerConfig,
       imap,
-      router,
-      responder
+      smtp: { forwardOriginalMail }
     });
 
-    const drafts = db.listDrafts();
-    expect(drafts).toHaveLength(1);
-    expect(drafts[0]?.status).toBe("pending_review");
+    expect(forwardOriginalMail).toHaveBeenCalledOnce();
+    expect(forwardOriginalMail).toHaveBeenCalledWith({
+      forwardToAddress: "archive@example.com",
+      original: expect.objectContaining({
+        messageId: "<worker-1@example.com>",
+        fromAddress: "alice@example.com",
+        subject: "Please forward",
+        replyToAddresses: ["reply@example.com"],
+        bodyText: "Can you keep this for me?"
+      }),
+      rawSource,
+      uid: 77,
+      runId: expect.any(String)
+    });
     expect(markSeen).toHaveBeenCalledWith("INBOX", 77);
+    expect(forwardOriginalMail.mock.invocationCallOrder[0]).toBeLessThan(markSeen.mock.invocationCallOrder[0]);
+
+    const email = db.sqlite.prepare("SELECT id, status FROM emails WHERE message_id = ?").get("<worker-1@example.com>") as
+      | { id: number; status: string }
+      | undefined;
+    expect(email?.status).toBe("processed");
+
+    const action = db.sqlite
+      .prepare("SELECT action_type AS actionType, recipient, subject, status FROM outbound_actions WHERE email_id = ?")
+      .get(email?.id) as { actionType: string; recipient: string; subject: string; status: string } | undefined;
+    expect(action).toEqual({
+      actionType: "forward_original",
+      recipient: "archive@example.com",
+      subject: "Fwd: Please forward",
+      status: "sent"
+    });
 
     await runPollOnce({
       db,
-      config: {
-        yahooEmail: "me@yahoo.com",
-        maxEmailChars: 12000,
-        minAutoConfidence: 0.92,
-        autoSend: false,
-        draftReviewAddress: undefined
-      },
+      config: workerConfig,
       imap,
-      router,
-      responder
+      smtp: { forwardOriginalMail }
     });
 
-    expect(router).toHaveBeenCalledTimes(1);
+    expect(forwardOriginalMail).toHaveBeenCalledTimes(1);
     expect(markSeen).toHaveBeenCalledTimes(1);
     db.close();
   });
 
-  it("routes low-confidence non-draft decisions to human review", async () => {
+  it("records failures and leaves messages unseen when SMTP forwarding fails", async () => {
     const db = createMailAgentDb(":memory:");
     const markSeen = vi.fn();
+    const forwardOriginalMail = vi.fn().mockRejectedValue(new Error("SMTP unavailable"));
     const imap = {
       fetchUnseen: vi.fn().mockResolvedValue([
         {
           mailbox: "INBOX",
           uidValidity: "999",
           uid: 78,
-          source: Buffer.from(`From: Alice <alice@example.com>
+          source: Buffer.from(`From: Bob <bob@example.com>
 To: Me <me@yahoo.com>
-Subject: Ambiguous
+Subject: Failing message
 Message-ID: <worker-2@example.com>
 Date: Mon, 1 Jan 2024 12:00:00 +0000
 
-Maybe we should talk later.`)
+This should not be marked seen.`)
         }
       ]),
       markSeen
     };
-    const router = vi.fn().mockResolvedValue({
-      category: "unknown",
-      confidence: 0.4,
-      recommended_action: "mark_seen",
-      risk_flags: [],
-      reason: "ambiguous"
-    });
-    const responder = vi.fn();
 
     await runPollOnce({
       db,
-      config: {
-        yahooEmail: "me@yahoo.com",
-        maxEmailChars: 12000,
-        minAutoConfidence: 0.92,
-        autoSend: false,
-        draftReviewAddress: undefined
-      },
+      config: workerConfig,
       imap,
-      router,
-      responder
+      smtp: { forwardOriginalMail }
     });
 
-    const email = db.sqlite
-      .prepare("SELECT status FROM emails WHERE message_id = ?")
-      .get("<worker-2@example.com>") as { status: string } | undefined;
+    const email = db.sqlite.prepare("SELECT id, status FROM emails WHERE message_id = ?").get("<worker-2@example.com>") as
+      | { id: number; status: string }
+      | undefined;
+    expect(email?.status).toBe("failed");
 
-    expect(email?.status).toBe("human_review");
-    expect(responder).not.toHaveBeenCalled();
-    expect(markSeen).toHaveBeenCalledWith("INBOX", 78);
+    const error = db.sqlite.prepare("SELECT stage, message, retryable FROM errors WHERE email_id = ?").get(email?.id) as
+      | { stage: string; message: string; retryable: 0 | 1 }
+      | undefined;
+    expect(error).toEqual({
+      stage: "forward_original",
+      message: "SMTP unavailable",
+      retryable: 1
+    });
+    expect(markSeen).not.toHaveBeenCalled();
     db.close();
   });
 });

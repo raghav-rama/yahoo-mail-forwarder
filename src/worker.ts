@@ -3,25 +3,43 @@ import type { WorkerConfig } from "./config.js";
 import type { MailAgentDb } from "./db/client.js";
 import { parseEmailSource, type ParsedEmail } from "./email/parser.js";
 import type { ImapMailboxClient, UnseenMessage } from "./email/imap.js";
-import type { SmtpClient } from "./email/smtp.js";
-import { detectSafetySignals, shouldNeverReply } from "./agent/safety.js";
-import type { LlmEmailInput, ResponderDraft, RouterDecision } from "./agent/schemas.js";
+import { buildForwardSubject, type SmtpClient } from "./email/smtp.js";
+
+export type WorkerLogger = {
+  info: (bindings: Record<string, unknown>, message?: string) => void;
+  warn: (bindings: Record<string, unknown>, message?: string) => void;
+  error: (bindings: Record<string, unknown>, message?: string) => void;
+  debug: (bindings: Record<string, unknown>, message?: string) => void;
+};
 
 export type WorkerDependencies = {
   db: MailAgentDb;
   config: WorkerConfig;
   imap: Pick<ImapMailboxClient, "fetchUnseen" | "markSeen">;
-  smtp?: Pick<SmtpClient, "forwardDraftForReview" | "sendReply">;
-  router: (email: LlmEmailInput) => Promise<RouterDecision>;
-  responder: (input: { email: LlmEmailInput; decisionReason: string }) => Promise<ResponderDraft>;
+  smtp: Pick<SmtpClient, "forwardOriginalMail">;
+  logger?: WorkerLogger;
+};
+
+const noopLogger: WorkerLogger = {
+  info() {},
+  warn() {},
+  error() {},
+  debug() {}
 };
 
 export async function runPollOnce(dependencies: WorkerDependencies): Promise<void> {
-  const messages = await dependencies.imap.fetchUnseen("INBOX");
+  const logger = dependencies.logger ?? noopLogger;
+  const mailbox = "INBOX";
+
+  logger.info({ mailbox }, "Mail poll started");
+  const messages = await dependencies.imap.fetchUnseen(mailbox);
+  logger.info({ mailbox, unseenCount: messages.length }, "Fetched unseen mail");
 
   for (const message of messages) {
-    await processUnseenMessage(dependencies, message);
+    await processUnseenMessage(dependencies, message, logger);
   }
+
+  logger.info({ mailbox, unseenCount: messages.length }, "Mail poll completed");
 }
 
 export async function startPolling(
@@ -43,11 +61,22 @@ export async function startPolling(
   }
 }
 
-async function processUnseenMessage(dependencies: WorkerDependencies, message: UnseenMessage): Promise<void> {
+async function processUnseenMessage(
+  dependencies: WorkerDependencies,
+  message: UnseenMessage,
+  logger: WorkerLogger
+): Promise<void> {
   let emailId: number | undefined;
+  let stage = "parse_message";
+
+  logger.info(
+    { mailbox: message.mailbox, uid: message.uid, uidValidity: message.uidValidity },
+    "Processing unseen message"
+  );
 
   try {
     const parsed = await parseEmailSource(message.source, dependencies.config.maxEmailChars);
+    logParsedMetadata(logger, message, parsed);
 
     if (
       dependencies.db.hasProcessedEmail({
@@ -57,9 +86,14 @@ async function processUnseenMessage(dependencies: WorkerDependencies, message: U
         messageId: parsed.messageId
       })
     ) {
+      logger.info(
+        { mailbox: message.mailbox, uid: message.uid, uidValidity: message.uidValidity, messageId: parsed.messageId },
+        "Skipping duplicate message"
+      );
       return;
     }
 
+    stage = "save_email";
     const threadKey = buildThreadKey(parsed);
     const saved = dependencies.db.saveEmail({
       mailbox: message.mailbox,
@@ -77,150 +111,93 @@ async function processUnseenMessage(dependencies: WorkerDependencies, message: U
     });
     emailId = saved.id;
 
-    const safety = detectSafetySignals({
-      fromAddress: parsed.fromAddress,
-      selfAddress: dependencies.config.yahooEmail,
-      headers: parsed.headers,
-      bodyText: parsed.bodyText
-    });
-
-    if (shouldNeverReply(safety)) {
-      const decision: RouterDecision = {
-        category: safety.isListMail ? "newsletter" : "unknown",
-        confidence: 1,
-        recommended_action: "mark_seen",
-        risk_flags: ["never_reply"],
-        reason: "Message matched deterministic no-reply safety guardrails."
-      };
-      dependencies.db.saveAgentDecision(saved.id, decision);
-      dependencies.db.updateEmailStatus(saved.id, "ignored");
-      await dependencies.imap.markSeen(message.mailbox, message.uid);
-      return;
-    }
-
-    const llmEmail = toLlmEmailInput(parsed, safety.riskFlags);
-    const decision = await dependencies.router(llmEmail);
-    const guardedDecision = applyPolicyToDecision(decision, {
-      riskFlags: safety.riskFlags,
-      minConfidence: dependencies.config.minAutoConfidence
-    });
-    dependencies.db.saveAgentDecision(saved.id, guardedDecision);
-
-    if (guardedDecision.recommended_action !== "draft_reply") {
-      dependencies.db.updateEmailStatus(
-        saved.id,
-        guardedDecision.recommended_action === "human_review" ? "human_review" : "processed"
-      );
-      await dependencies.imap.markSeen(message.mailbox, message.uid);
-      return;
-    }
-
-    if (safety.requiresHumanReview) {
-      dependencies.db.updateEmailStatus(saved.id, "human_review");
-      await dependencies.imap.markSeen(message.mailbox, message.uid);
-      return;
-    }
-
-    const draft = await dependencies.responder({
-      email: llmEmail,
-      decisionReason: guardedDecision.reason
-    });
-    const recipient = parsed.replyToAddresses[0] ?? parsed.fromAddress ?? "";
-    dependencies.db.saveDraft({
-      emailId: saved.id,
-      recipient,
-      draft,
-      status: "pending_review"
-    });
-
-    if (dependencies.config.draftReviewAddress && dependencies.smtp) {
-      const runId = crypto.randomUUID();
-      await dependencies.smtp.forwardDraftForReview({
-        originalFrom: parsed.fromAddress,
-        reviewAddress: dependencies.config.draftReviewAddress,
-        draft,
+    const runId = crypto.randomUUID();
+    stage = "forward_original";
+    logger.info(
+      {
+        mailbox: message.mailbox,
+        uid: message.uid,
+        emailId,
+        recipient: dependencies.config.forwardToAddress,
         runId
-      });
-      dependencies.db.recordOutboundAction({
-        emailId: saved.id,
-        actionType: "forward_draft_for_review",
-        recipient: dependencies.config.draftReviewAddress,
-        subject: draft.reply_subject,
-        status: "sent",
-        runId
-      });
-    }
+      },
+      "Forwarding original message"
+    );
+    await dependencies.smtp.forwardOriginalMail({
+      forwardToAddress: dependencies.config.forwardToAddress,
+      original: parsed,
+      rawSource: message.source,
+      uid: message.uid,
+      runId
+    });
+    logger.info({ mailbox: message.mailbox, uid: message.uid, emailId, runId }, "Forwarded original message");
 
-    dependencies.db.updateEmailStatus(saved.id, draft.requires_human_review ? "human_review" : "processed");
+    stage = "record_outbound_action";
+    dependencies.db.recordOutboundAction({
+      emailId,
+      actionType: "forward_original",
+      recipient: dependencies.config.forwardToAddress,
+      subject: buildForwardSubject(parsed.subject),
+      status: "sent",
+      runId
+    });
+
+    dependencies.db.updateEmailStatus(emailId, "processed");
+
+    stage = "mark_seen";
     await dependencies.imap.markSeen(message.mailbox, message.uid);
+    logger.info({ mailbox: message.mailbox, uid: message.uid, emailId }, "Marked message seen");
   } catch (error) {
+    const messageText = error instanceof Error ? error.message : String(error);
     dependencies.db.recordError({
       emailId,
-      stage: "process_message",
-      message: error instanceof Error ? error.message : String(error),
+      stage,
+      message: messageText,
       retryable: true
     });
 
     if (emailId !== undefined) {
       dependencies.db.updateEmailStatus(emailId, "failed");
     }
+
+    logger.error(
+      {
+        err: error,
+        mailbox: message.mailbox,
+        uid: message.uid,
+        emailId,
+        stage
+      },
+      "Message processing failed"
+    );
   }
 }
 
-function toLlmEmailInput(parsed: ParsedEmail, safetyFlags: string[]): LlmEmailInput {
-  return {
-    from: parsed.fromAddress,
-    subject: parsed.subject,
-    date: parsed.date?.toISOString(),
-    messageId: parsed.messageId,
-    body: parsed.bodyText,
-    attachments: parsed.attachments.map((attachment) => ({
-      filename: attachment.filename,
-      contentType: attachment.contentType,
-      size: attachment.size
-    })),
-    safetyFlags
-  };
-}
+function logParsedMetadata(logger: WorkerLogger, message: UnseenMessage, parsed: ParsedEmail): void {
+  logger.debug(
+    {
+      mailbox: message.mailbox,
+      uid: message.uid,
+      messageId: parsed.messageId,
+      from: parsed.fromAddress,
+      subject: parsed.subject,
+      bodyPreviewLength: parsed.bodyText.length,
+      attachmentCount: parsed.attachments.length
+    },
+    "Parsed message metadata"
+  );
 
-function applyPolicyToDecision(
-  decision: RouterDecision,
-  policy: {
-    riskFlags: string[];
-    minConfidence: number;
+  if (!parsed.messageId || !parsed.fromAddress) {
+    logger.warn(
+      {
+        mailbox: message.mailbox,
+        uid: message.uid,
+        messageId: parsed.messageId,
+        from: parsed.fromAddress
+      },
+      "Parsed message missing expected metadata"
+    );
   }
-): RouterDecision {
-  const extraFlags = new Set(policy.riskFlags);
-  let recommendedAction = decision.recommended_action;
-  let reason = decision.reason;
-
-  if (decision.confidence < policy.minConfidence) {
-    extraFlags.add("low_confidence");
-    recommendedAction = "human_review";
-    reason = `${reason} Confidence is below the configured threshold.`;
-  }
-
-  if (decision.recommended_action === "draft_reply" && decision.category !== "needs_action") {
-    extraFlags.add("category_action_mismatch");
-    recommendedAction = "human_review";
-    reason = `${reason} Draft replies require needs_action classification.`;
-  }
-
-  if (policy.riskFlags.length > 0) {
-    recommendedAction = "human_review";
-    reason = `${reason} Deterministic safety checks require human review.`;
-  }
-
-  if (extraFlags.size === 0 && recommendedAction === decision.recommended_action) {
-    return decision;
-  }
-
-  return {
-    ...decision,
-    recommended_action: recommendedAction,
-    risk_flags: [...new Set([...decision.risk_flags, ...extraFlags])],
-    reason
-  };
 }
 
 function buildThreadKey(parsed: ParsedEmail): string {

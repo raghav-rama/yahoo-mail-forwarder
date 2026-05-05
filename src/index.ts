@@ -1,19 +1,14 @@
-import OpenAI from "openai";
 import pino from "pino";
 import { loadConfig } from "./config.js";
 import { createMailAgentDb } from "./db/client.js";
 import { createYahooImapClient } from "./email/imap.js";
 import { createYahooSmtpClient } from "./email/smtp.js";
-import { draftReply } from "./agent/responder.js";
-import { routeEmail } from "./agent/router.js";
-import type { LlmEmailInput } from "./agent/schemas.js";
 import { runPollOnce, startPolling } from "./worker.js";
 
 async function main() {
   const config = loadConfig();
   const logger = pino({ level: config.logLevel });
   const db = createMailAgentDb(config.databasePath);
-  const openai = new OpenAI({ apiKey: config.openaiApiKey });
   const imap = createYahooImapClient(config);
   const smtp = createYahooSmtpClient(config);
   const abortController = new AbortController();
@@ -23,19 +18,7 @@ async function main() {
     config,
     imap,
     smtp,
-    router: (email: LlmEmailInput) =>
-      routeEmail({
-        openai,
-        model: config.openaiModel,
-        email
-      }),
-    responder: ({ email, decisionReason }: { email: LlmEmailInput; decisionReason: string }) =>
-      draftReply({
-        openai,
-        model: config.openaiModel,
-        email,
-        decisionReason
-      })
+    logger
   };
 
   const shutdown = async () => {
@@ -54,11 +37,23 @@ async function main() {
     return;
   }
 
-  logger.info({ intervalMs: config.mailPollIntervalMs }, "Starting Yahoo mail agent poller");
+  logger.info(
+    {
+      config: {
+        yahooEmail: config.yahooEmail,
+        forwardToAddress: config.forwardToAddress,
+        mailPollIntervalMs: config.mailPollIntervalMs,
+        maxEmailChars: config.maxEmailChars,
+        databasePath: config.databasePath,
+        logLevel: config.logLevel
+      }
+    },
+    "Starting Yahoo mail forwarder"
+  );
   await startPolling(dependencies, {
     intervalMs: config.mailPollIntervalMs,
     signal: abortController.signal,
-    onError: (error) => logger.error({ err: error }, "Polling iteration failed")
+    onError: (error) => logger.error({ err: error, mailbox: "INBOX", stage: "poll_iteration" }, "Polling iteration failed")
   });
 }
 

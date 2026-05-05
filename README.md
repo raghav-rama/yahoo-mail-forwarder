@@ -1,8 +1,8 @@
-# Yahoo Mail Forwarding Agent
+# Yahoo Mail Forwarder
 
-TypeScript background worker for Yahoo Mail triage and draft generation.
+TypeScript background worker for forwarding incoming Yahoo Mail.
 
-The v1 runtime is intentionally draft-only: it polls Yahoo IMAP for unseen mail, parses and sanitizes the message, stores idempotency state in SQLite, asks OpenAI for a structured routing decision, optionally generates a structured draft, stores that draft for review, and only then marks the inbound message seen.
+The runtime polls Yahoo IMAP for unseen mail, parses and stores an idempotency row in SQLite, forwards every non-duplicate message to `FORWARD_TO_ADDRESS` over Yahoo SMTP, records the outbound action, and only then marks the inbound message seen. SMTP forwards include a readable text summary plus the original raw email attached as a `.eml` file. Yahoo SMTP rejected at least one real forwarded message when the attachment used `message/rfc822`, so the worker sends the `.eml` attachment as `application/octet-stream`. Original reply addresses are included in the summary body instead of the outbound `Reply-To` header because Yahoo rejected the live forwarded message when the header was set to the original sender.
 
 ## Setup
 
@@ -11,7 +11,7 @@ pnpm install
 cp .env.example .env
 ```
 
-Fill in `YAHOO_EMAIL`, `YAHOO_APP_PASSWORD`, and `OPENAI_API_KEY`. Use a Yahoo app password, not the account password.
+Fill in `YAHOO_EMAIL`, `YAHOO_APP_PASSWORD`, and `FORWARD_TO_ADDRESS`. Use a Yahoo app password, not the account password. `FORWARD_TO_ADDRESS` must be different from `YAHOO_EMAIL`.
 
 ## Commands
 
@@ -23,18 +23,17 @@ pnpm worker:once
 pnpm dev
 ```
 
-## Safety Model
+## Processing Model
 
-- No automatic sends in v1. `AUTO_SEND=false` is the default and direct send logic is not wired into the worker.
-- The worker skips replies to self, list mail, auto responses, and no-reply senders.
-- Financial, legal, credential, and security-sensitive requests route to human review.
-- Only sanitized text, normalized headers, and attachment metadata go to the model. Raw MIME and attachment bytes stay out of prompts and SQLite.
-- Drafts are stored locally with `pending_review` status. If `DRAFT_REVIEW_ADDRESS` is set, a proposed draft can also be forwarded for review.
+- Every unseen, non-duplicate message is forwarded.
+- Duplicate detection uses either the RFC Message-ID or the Yahoo mailbox UID tuple.
+- Messages are marked seen only after SMTP forwarding and outbound action recording both succeed.
+- Forwarding failures are recorded in `errors`, the email status is set to `failed`, and the message is left unseen for retry.
+- Existing SQLite databases may still contain old tables from earlier versions; the current schema only creates `emails`, `threads`, `outbound_actions`, and `errors`.
 
 ## Manual Smoke
 
-1. Set `.env` with Yahoo and OpenAI credentials.
-2. Keep `AUTO_SEND=false`.
-3. Send a test email to the Yahoo inbox.
-4. Run `pnpm worker:once`.
-5. Inspect `data/mail-agent.db` for `emails`, `agent_decisions`, and `drafts` rows.
+1. Set `.env` with Yahoo credentials and `FORWARD_TO_ADDRESS`.
+2. Send a test email to the Yahoo inbox.
+3. Run `pnpm worker:once`.
+4. Inspect `data/mail-forwarder.db` for `emails`, `outbound_actions`, and `errors` rows.

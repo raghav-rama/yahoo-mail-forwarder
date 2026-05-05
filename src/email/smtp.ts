@@ -1,23 +1,21 @@
 import crypto from "node:crypto";
 import nodemailer, { type SentMessageInfo } from "nodemailer";
 import type { AppConfig } from "../config.js";
-import type { ResponderDraft } from "../agent/schemas.js";
+import type { ParsedEmail } from "./parser.js";
 
-export type DraftForwardInput = {
-  originalFrom?: string;
-  reviewAddress: string;
-  draft: ResponderDraft;
+export type OriginalMailForwardInput = {
+  forwardToAddress: string;
+  original: Pick<
+    ParsedEmail,
+    "messageId" | "fromAddress" | "subject" | "date" | "replyToAddresses" | "bodyText"
+  >;
+  rawSource: Buffer;
+  uid: number;
   runId?: string;
 };
 
 export type SmtpClient = {
-  forwardDraftForReview(input: DraftForwardInput): Promise<SentMessageInfo>;
-  sendReply(input: {
-    to: string;
-    subject: string;
-    bodyText: string;
-    runId?: string;
-  }): Promise<SentMessageInfo>;
+  forwardOriginalMail(input: OriginalMailForwardInput): Promise<SentMessageInfo>;
   close(): void;
 };
 
@@ -33,33 +31,24 @@ export function createYahooSmtpClient(config: Pick<AppConfig, "yahooEmail" | "ya
   });
 
   return {
-    forwardDraftForReview(input) {
-      return transporter.sendMail({
-        from: config.yahooEmail,
-        to: input.reviewAddress,
-        subject: `[Review draft] ${input.draft.reply_subject}`,
-        text: [
-          `Original sender: ${input.originalFrom ?? "unknown"}`,
-          "",
-          "Proposed draft:",
-          "",
-          input.draft.reply_body_text
-        ].join("\n"),
-        headers: {
-          "X-Yahoo-Agent-Run-Id": input.runId ?? crypto.randomUUID()
-        }
-      });
-    },
+    forwardOriginalMail(input) {
+      const subject = buildForwardSubject(input.original.subject);
 
-    sendReply(input) {
       return transporter.sendMail({
         from: config.yahooEmail,
-        to: input.to,
-        subject: input.subject,
-        text: input.bodyText,
+        to: input.forwardToAddress,
+        subject,
+        text: buildForwardBody(input.original),
         headers: {
-          "X-Yahoo-Agent-Run-Id": input.runId ?? crypto.randomUUID()
-        }
+          "X-Yahoo-Forwarder-Run-Id": input.runId ?? crypto.randomUUID()
+        },
+        attachments: [
+          {
+            filename: buildAttachmentFilename(input.original.messageId, input.uid),
+            content: input.rawSource,
+            contentType: "application/octet-stream"
+          }
+        ]
       });
     },
 
@@ -67,4 +56,30 @@ export function createYahooSmtpClient(config: Pick<AppConfig, "yahooEmail" | "ya
       transporter.close();
     }
   };
+}
+
+export function buildForwardSubject(subject: string): string {
+  return `Fwd: ${subject.trim() || "(no subject)"}`;
+}
+
+function buildForwardBody(original: OriginalMailForwardInput["original"]): string {
+  return [
+    "Forwarded original Yahoo mail.",
+    "",
+    `Original from: ${original.fromAddress ?? "unknown"}`,
+    `Original reply-to: ${original.replyToAddresses[0] ?? "unknown"}`,
+    `Original subject: ${original.subject.trim() || "(no subject)"}`,
+    `Original date: ${original.date?.toISOString() ?? "unknown"}`,
+    `Original message id: ${original.messageId ?? "unknown"}`,
+    "",
+    "Parsed body preview:",
+    "",
+    original.bodyText.trim() || "(empty body)"
+  ].join("\n");
+}
+
+function buildAttachmentFilename(messageId: string | undefined, uid: number): string {
+  const base = messageId ? messageId.replace(/^<|>$/g, "") : `uid-${uid}`;
+  const safeBase = base.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  return `${safeBase || `uid-${uid}`}.eml`;
 }

@@ -28,31 +28,6 @@ CREATE TABLE IF NOT EXISTS threads (
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS agent_decisions (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  email_id INTEGER NOT NULL REFERENCES emails(id),
-  category TEXT NOT NULL,
-  confidence REAL NOT NULL,
-  recommended_action TEXT NOT NULL,
-  risk_flags_json TEXT NOT NULL,
-  reason TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS drafts (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  email_id INTEGER NOT NULL REFERENCES emails(id),
-  recipient TEXT NOT NULL,
-  subject TEXT NOT NULL,
-  body_text TEXT NOT NULL,
-  tone TEXT NOT NULL,
-  missing_context_json TEXT NOT NULL,
-  confidence REAL NOT NULL,
-  requires_human_review INTEGER NOT NULL,
-  status TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
 CREATE TABLE IF NOT EXISTS outbound_actions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   email_id INTEGER REFERENCES emails(id),
@@ -74,7 +49,5 @@ CREATE TABLE IF NOT EXISTS errors (
 );
 
 CREATE INDEX IF NOT EXISTS idx_emails_status ON emails(status);
-CREATE INDEX IF NOT EXISTS idx_agent_decisions_email_id ON agent_decisions(email_id);
-CREATE INDEX IF NOT EXISTS idx_drafts_email_id ON drafts(email_id);
 CREATE INDEX IF NOT EXISTS idx_errors_email_id ON errors(email_id);
 `;
